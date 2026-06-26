@@ -1,0 +1,76 @@
+[DATA]
+#Helicopter to track, based off ICAO or ICAO24 which is the unique transponder address.
+ICAO = icaohere
+
+#Optional Per-Helicopter Overrides
+; OVERRIDE_REG=
+; OVERRIDE_ICAO_TYPE=
+; OVERRIDE_TYPELONG =
+; OVERRIDE_OWNER =
+; DATA_LOSS_MINS = 20
+; CONCEAL_AC_ID = True
+; CONCEAL_PIA = False
+#Miles the aircraft must stay within (of the centroid of its recent track) to count as
+#circling, not just turning while traveling. Default (15) is tuned for a business jet's
+#wide holding pattern - tightened here since a helicopter circling one neighborhood block
+#is a much smaller area. Treat 1.0 as a first guess to refine once real data comes in.
+CIRCLING_CENTROID_RADIUS_MI = 1.0
+
+[MAP]
+#Optional, map selection moved to mainconf, this is for map overlays per helicopter
+#Tar1090 overlays option, should be seperated by comma no space, remove option all together to disable any
+OVERLAYS = nexrad
+
+[AIRPORT]
+#Requires a list of airport types, used for "nearest airport/heliport" lookups in messages.
+#Choices: small_airport, medium_airport, large_airport, heliport, seaplane_base
+#Heliport included since this fleet's home base is likely a heliport, not an airport.
+TYPES = [heliport, small_airport, medium_airport, large_airport]
+
+#TITLE for Twitter, PB and Discord are Just text added to the front of each message/tweet sent
+[TWITTER]
+ENABLE = FALSE
+TITLE =
+ACCESS_TOKEN = athere
+ACCESS_TOKEN_SECRET = atshere
+
+[DISCORD]
+ENABLE = FALSE
+#WEBHOOK URL https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks
+URL = webhookurl
+#Role to tag optional, the role ID
+ROLE_ID =
+Title =
+USERNAME = cbus-helicopter-watch
+
+[META]
+ENABLE = False
+FB_PAGE_ID =
+IG_USER_ID =
+ACCESS_TOKEN =
+
+
+[TELEGRAM]
+ENABLE = FALSE
+TITLE = Title Of Telegram message
+ROOM_ID = -100xxxxxxxxxx
+BOT_TOKEN = xxxxxxxxxx:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+[MASTODON]
+ENABLE = FALSE
+ACCESS_TOKEN = mastodonaccesstoken
+APP_URL = mastodonappurl
+
+[BLUESKY]
+#We don't post takeoff/landing for this project - leave ENABLE off and use
+#ENABLE_CIRCLING instead, which the circling-detection block checks separately.
+ENABLE = FALSE
+ENABLE_CIRCLING = TRUE
+HANDLE = yourbot.bsky.social
+#Create this under Settings > App Passwords on bsky.app, never use your main account password
+APP_PASSWORD = xxxx-xxxx-xxxx-xxxx
+#Real-time posting for circling events (no delay) - chosen over a delay so this is useful
+#as live community situational awareness. Trade-off: this does mean live-broadcasting
+#helicopter position during an active incident. DELAY_MINS only applies if ENABLE (not
+#ENABLE_CIRCLING) is also turned on for takeoff/landing posts.
+DELAY_MINS = 0
