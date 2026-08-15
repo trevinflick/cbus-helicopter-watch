@@ -1,7 +1,7 @@
 import requests
 
 def pull_airplaneslive(icao):
-    url = "https://api.airplanes.live/v2/hex/" + icao
+    url = "https://opendata.adsb.fi/api/v2/hex/" + icao
     headers = {"User-Agent": "plane-notify (https://github.com/Jxck-S/plane-notify)"}
     try:
         response = requests.get(url, headers=headers, timeout=30)
