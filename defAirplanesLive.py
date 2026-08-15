@@ -1,6 +1,8 @@
+import time
 import requests
 
 def pull_airplaneslive(icao):
+    time.sleep(2)  # avoid 429s when polling multiple ICAOs in sequence
     url = "https://opendata.adsb.fi/api/v2/hex/" + icao
     headers = {"User-Agent": "plane-notify (https://github.com/Jxck-S/plane-notify)"}
     try:
