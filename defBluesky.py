@@ -12,7 +12,7 @@ def sendBluesky(photo, message, config):
             client.login(config.get('BLUESKY', 'HANDLE'), config.get('BLUESKY', 'APP_PASSWORD'))
             with open(photo, 'rb') as f:
                 image_bytes = f.read()
-            response = client.send_image(text=text, image=image_bytes, image_alt=message)
+            response = client.send_image(text=text, image=image_bytes, image_alt=message + "\nData: https://adsb.fi")
         except UnauthorizedError:
             print('Invalid Bluesky handle/app password, message not sent.')
             break
