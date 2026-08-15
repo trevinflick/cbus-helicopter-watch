@@ -679,14 +679,16 @@ class Plane:
                         self.circle_history["traces"].append((time.time(), self.latitude, self.longitude, track_change))
 
                 total_change = 0
+                total_abs_change = 0
                 coords = []
                 for trace in self.circle_history["traces"]:
                     total_change += float(trace[3])
+                    total_abs_change += abs(float(trace[3]))
                     coords.append((float(trace[1]), float(trace[2])))
 
-                print("Total Bearing Change", round(total_change, 3))
+                print("Total Bearing Change", round(total_change, 3), "/ Abs:", round(total_abs_change, 3))
                 #Check Centroid when Bearing change meets req
-                if abs(total_change) >= 720 and self.circle_history['triggered'] is False:
+                if total_abs_change >= 720 and self.circle_history['triggered'] is False:
                     print("Circling Bearing Change Met")
                     from shapely.geometry import MultiPoint
                     from geopy.distance import geodesic
@@ -909,7 +911,7 @@ class Plane:
                         if os.path.isfile(self.map_file_name):
                             os.remove(self.map_file_name)
                         self.circle_history['triggered'] = True
-                elif abs(total_change) <= 360 and self.circle_history["triggered"]:
+                elif total_abs_change <= 360 and self.circle_history["triggered"]:
                     print("No Longer Circling, trigger cleared")
                     try:
                         import dataLog
