@@ -850,7 +850,7 @@ class Plane:
 
                         try:
                             from defSS import get_adsbx_screenshot
-                            url_params = f"largeMode=2&hideButtons&hideSidebar&mapDim=0&zoom=10&icao={self.icao}&overlays={self.get_adsbx_map_overlays()}&limitupdates=0"
+                            url_params = f"largeMode=2&hideButtons&hideSidebar&mapDim=0&zoom=13&icao={self.icao}&overlays={self.get_adsbx_map_overlays()}&limitupdates=0"
                             get_adsbx_screenshot(self.map_file_name, url_params, overrides=self.overrides, conceal_ac_id=self.conceal_ac_id, conceal_pia=self.conceal_pia)
                             if neighborhood is not None:
                                 message = f"Circling over {neighborhood} at {self.alt_ft}ft."
