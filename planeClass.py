@@ -337,7 +337,7 @@ class Plane:
         self.run_check()
     def run_check(self):
         """Runs a check of a plane module to see if its landed or takenoff using plane data, and takes action if so."""
-        if self.config.has_section('BLUESKY') and self.config.getboolean('BLUESKY', 'ENABLE'):
+        if self._channel_enabled('BLUESKY') or self._channel_enabled('BLUESKY', circling=True):
             self.flush_bluesky_queue()
         print(self)
         #Ability to Remove old Map
