@@ -10,11 +10,13 @@ ICAO = icaohere
 ; DATA_LOSS_MINS = 20
 ; CONCEAL_AC_ID = True
 ; CONCEAL_PIA = False
-#Miles the aircraft must stay within (of the centroid of its recent track) to count as
-#circling, not just turning while traveling. Default (15) is tuned for a business jet's
-#wide holding pattern - tightened here since a helicopter circling one neighborhood block
-#is a much smaller area. Treat 1.0 as a first guess to refine once real data comes in.
+#Circling = every position over the last CIRCLING_WINDOW_MIN minutes stays within
+#CIRCLING_CENTROID_RADIUS_MI miles of those positions' centroid, with at least
+#CIRCLING_MIN_TURN_DEG of total turning (see loiter.py). Transit at helicopter speeds covers
+#several miles in that window, so it can't pass. Defaults: 1.0 mi, 5 min, 180 deg.
 CIRCLING_CENTROID_RADIUS_MI = 1.0
+; CIRCLING_WINDOW_MIN = 5
+; CIRCLING_MIN_TURN_DEG = 180
 
 [MAP]
 #Optional, map selection moved to mainconf, this is for map overlays per helicopter

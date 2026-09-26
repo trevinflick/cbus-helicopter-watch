@@ -315,6 +315,9 @@ class Plane:
             'photo_path': held_photo_path,
             'db_event_id': db_event_id,
         })
+        #With no delay, send now rather than waiting for this aircraft's next run_check a full poll cycle later
+        if delay_mins <= 0:
+            self.flush_bluesky_queue()
     def flush_bluesky_queue(self):
         """Sends any queued Bluesky posts whose delay has elapsed."""
         import os
@@ -594,11 +597,19 @@ class Plane:
 
         if self.circle_history is not None:
             #Expires traces for circles
-            if self.circle_history["traces"] != []:
-                for trace in self.circle_history["traces"]:
-                    if (datetime.now() - datetime.fromtimestamp(trace[0])).total_seconds() >= 20*60:
-                        print("Trace Expire, removed")
-                        self.circle_history["traces"].remove(trace)
+            import time
+            self.circle_history["traces"] = [trace for trace in self.circle_history["traces"] if time.time() - trace[0] < 20*60]
+            #Ends a circling event if the aircraft has dropped off the feed (landed or out of coverage) for 10 min
+            if self.circle_history['triggered'] and (not self.circle_history["traces"] or time.time() - self.circle_history["traces"][-1][0] >= 10*60):
+                print("No positions for 10 min, circling trigger cleared")
+                try:
+                    import dataLog
+                    dataLog.record_circling_end(self.circle_history.get('db_event_id'))
+                except Exception as e:
+                    print(f"Error logging circling event end, continuing: {e}")
+                self.circle_history['triggered'] = False
+                self.circle_history['db_event_id'] = None
+                self.circle_history.pop('centroid', None)
             #Expire touchngo
             if "touchngo" in self.circle_history.keys() and (datetime.now() - datetime.fromtimestamp(self.circle_history['touchngo'])).total_seconds() >= 10*60:
                 self.circle_history.pop("touchngo")
@@ -678,240 +689,226 @@ class Plane:
                     if self.latitude is not None and self.longitude is not None:
                         self.circle_history["traces"].append((time.time(), self.latitude, self.longitude, track_change))
 
-                total_change = 0
-                total_abs_change = 0
-                coords = []
-                for trace in self.circle_history["traces"]:
-                    total_change += float(trace[3])
-                    total_abs_change += abs(float(trace[3]))
-                    coords.append((float(trace[1]), float(trace[2])))
-
-                print("Total Bearing Change", round(total_change, 3), "/ Abs:", round(total_abs_change, 3))
-                #Check Centroid when Bearing change meets req
-                if total_abs_change >= 720 and self.circle_history['triggered'] is False:
-                    print("Circling Bearing Change Met")
+                circling_radius_mi = self.config.getfloat('DATA', 'CIRCLING_CENTROID_RADIUS_MI') if self.config.has_option('DATA', 'CIRCLING_CENTROID_RADIUS_MI') else 1.0
+                window_sec = self.config.getfloat('DATA', 'CIRCLING_WINDOW_MIN') * 60 if self.config.has_option('DATA', 'CIRCLING_WINDOW_MIN') else 5 * 60
+                min_turn_deg = self.config.getfloat('DATA', 'CIRCLING_MIN_TURN_DEG') if self.config.has_option('DATA', 'CIRCLING_MIN_TURN_DEG') else 180
+                from loiter import detect_loiter
+                from geopy.distance import geodesic
+                loiter = detect_loiter(self.circle_history["traces"], time.time(), window_sec, circling_radius_mi, min_turn_deg)
+                if loiter is not None and self.circle_history['triggered'] is False:
+                    centroid_lat, centroid_lon, window_traces = loiter
+                    print(f"Loitering within {circling_radius_mi} mi of ({centroid_lat:.5f}, {centroid_lon:.5f}) for {window_sec/60:.0f} min, CIRCLING")
+                    self.circle_history['centroid'] = (centroid_lat, centroid_lon)
+                    neighborhood = None
+                    try:
+                        from defNeighborhood import get_neighborhood
+                        neighborhood = get_neighborhood(centroid_lat, centroid_lon)
+                    except Exception as e:
+                        print(f"Error looking up neighborhood, continuing without it: {e}")
+                    try:
+                        import dataLog
+                        self.circle_history['db_event_id'] = dataLog.record_circling_start(
+                            self.icao, self.reg, centroid_lat, centroid_lon, neighborhood,
+                            window_traces, self.alt_ft)
+                    except Exception as e:
+                        print(f"Error logging circling event start, continuing without it: {e}")
+                    #Finds Nearest Airport
+                    from defAirport import getClosestAirport
+                    nearest_airport_dict = getClosestAirport(self.latitude, self.longitude, self.config.get("AIRPORT", "TYPES"))
+                    from calculate_headings import calculate_from_bearing, calculate_cardinal
+                    from_bearing = calculate_from_bearing((float(nearest_airport_dict['latitude_deg']), float(nearest_airport_dict['longitude_deg'])), (self.latitude, self.longitude))
+                    cardinal = calculate_cardinal(from_bearing)
+                    #Finds Nearest TFR or in TFR
                     from shapely.geometry import MultiPoint
                     from geopy.distance import geodesic
-                    aircraft_coords = (self.latitude, self.longitude)
-                    points = MultiPoint(coords)
-                    cent =  (points.centroid) #True centroid, not necessarily an existing point
-                    #rp =  (points.representative_point()) #A represenative point, not centroid,
-                    print(cent)
-                    #print(rp)
-                    distance_to_centroid = round(geodesic(aircraft_coords, cent.coords).mi, 2)
-                    print(f"Distance to centroid of circling coordinates {distance_to_centroid} miles")
-                    circling_radius_mi = self.config.getfloat('DATA', 'CIRCLING_CENTROID_RADIUS_MI') if self.config.has_option('DATA', 'CIRCLING_CENTROID_RADIUS_MI') else 15
-                    if distance_to_centroid <= circling_radius_mi:
-                        print(f"Within {circling_radius_mi} miles of centroid, CIRCLING")
-                        centroid_lat, centroid_lon = cent.coords[0][0], cent.coords[0][1]
-                        neighborhood = None
-                        try:
-                            from defNeighborhood import get_neighborhood
-                            neighborhood = get_neighborhood(centroid_lat, centroid_lon)
-                        except Exception as e:
-                            print(f"Error looking up neighborhood, continuing without it: {e}")
-                        try:
-                            import dataLog
-                            self.circle_history['db_event_id'] = dataLog.record_circling_start(
-                                self.icao, self.reg, centroid_lat, centroid_lon, neighborhood,
-                                self.circle_history["traces"], self.alt_ft)
-                        except Exception as e:
-                            print(f"Error logging circling event start, continuing without it: {e}")
-                        #Finds Nearest Airport
-                        from defAirport import getClosestAirport
-                        nearest_airport_dict = getClosestAirport(self.latitude, self.longitude, self.config.get("AIRPORT", "TYPES"))
-                        from calculate_headings import calculate_from_bearing, calculate_cardinal
-                        from_bearing = calculate_from_bearing((float(nearest_airport_dict['latitude_deg']), float(nearest_airport_dict['longitude_deg'])), (self.latitude, self.longitude))
-                        cardinal = calculate_cardinal(from_bearing)
-                        #Finds Nearest TFR or in TFR
-                        from shapely.geometry import MultiPoint
-                        from geopy.distance import geodesic
-                        from shapely.geometry.polygon import Polygon
-                        from shapely.geometry import Point
-                        import requests, json
-                        closest_tfr = None
-                        in_tfr = None
-                        if Plane.main_config.getboolean("TFRS", "ENABLE"):
-                            tfr_url = Plane.main_config.get("TFRS", "URL")
-                            response = requests.get(tfr_url, timeout=60)
-                            tfrs = json.loads(response.text)
-                            for tfr in tfrs:
-                                if in_tfr is not None:
-                                    break
-                                elif tfr['details'] is not None and 'shapes' in tfr['details'].keys():
-                                    for index, shape in enumerate(tfr['details']['shapes']):
-                                        if 'txtName' not in shape.keys():
-                                            shape['txtName'] = 'shape_'+str(index)
-                                        polygon = None
-                                        if shape['type'] == "poly":
-                                            points = shape['points']
-                                        elif shape['type'] == "circle":
-                                            from functools import partial
-                                            import pyproj
-                                            from shapely.ops import transform
-                                            from shapely.geometry import Point
-                                            proj_wgs84 = pyproj.Proj('+proj=longlat +datum=WGS84')
-                                            def geodesic_point_buffer(lat, lon, km):
-                                                # Azimuthal equidistant projection
-                                                aeqd_proj = '+proj=aeqd +lat_0={lat} +lon_0={lon} +x_0=0 +y_0=0'
-                                                project = partial(
-                                                    pyproj.transform,
-                                                    pyproj.Proj(aeqd_proj.format(lat=lat, lon=lon)),
-                                                    proj_wgs84)
-                                                buf = Point(0, 0).buffer(km * 1000)  # distance in metres
-                                                return transform(project, buf).exterior.coords[:]
-                                            radius_km = float(shape['radius']) *  1.852
-                                            b = geodesic_point_buffer(shape['lat'], shape['lon'], radius_km)
-                                            points = []
-                                            for coordinate in b:
-                                                points.append([coordinate[1], coordinate[0]])
-                                        elif shape['type'] in ["polyarc", "polyexclude"]:
-                                            points = shape['all_points']
-                                        aircraft_location = Point(self.latitude, self.longitude)
-                                        if polygon is None:
-                                            polygon = Polygon(points)
-                                        if polygon.contains(aircraft_location):
-                                            in_tfr = {'info': tfr, 'closest_shape_name' : shape['txtName']}
-                                            break
-                                        else:
-                                            point_dists = []
-                                            for point in points:
-                                                from geopy.distance import geodesic
-                                                point = tuple(point)
-                                                point_dists.append(float((geodesic((self.latitude, self.longitude), point).mi)))
-                                            distance = min(point_dists)
-                                            if closest_tfr is None:
-                                                closest_tfr = {'info': tfr, 'closest_shape_name' : shape['txtName'], 'distance' : round(distance)}
-                                            elif distance < closest_tfr['distance']:
-                                                closest_tfr = {'info': tfr, 'closest_shape_name' : shape['txtName'], 'distance' : round(distance)}
+                    from shapely.geometry.polygon import Polygon
+                    from shapely.geometry import Point
+                    import requests, json
+                    closest_tfr = None
+                    in_tfr = None
+                    if Plane.main_config.getboolean("TFRS", "ENABLE"):
+                        tfr_url = Plane.main_config.get("TFRS", "URL")
+                        response = requests.get(tfr_url, timeout=60)
+                        tfrs = json.loads(response.text)
+                        for tfr in tfrs:
                             if in_tfr is not None:
-                                for shape in in_tfr['info']['details']['shapes']:
-                                    if shape['txtName'] == in_tfr['closest_shape_name']:
-                                        valDistVerUpper, valDistVerLower = int(shape['valDistVerUpper']), int(shape['valDistVerLower'])
-                                        print("In TFR based off location checking alt next", in_tfr)
+                                break
+                            elif tfr['details'] is not None and 'shapes' in tfr['details'].keys():
+                                for index, shape in enumerate(tfr['details']['shapes']):
+                                    if 'txtName' not in shape.keys():
+                                        shape['txtName'] = 'shape_'+str(index)
+                                    polygon = None
+                                    if shape['type'] == "poly":
+                                        points = shape['points']
+                                    elif shape['type'] == "circle":
+                                        from functools import partial
+                                        import pyproj
+                                        from shapely.ops import transform
+                                        from shapely.geometry import Point
+                                        proj_wgs84 = pyproj.Proj('+proj=longlat +datum=WGS84')
+                                        def geodesic_point_buffer(lat, lon, km):
+                                            # Azimuthal equidistant projection
+                                            aeqd_proj = '+proj=aeqd +lat_0={lat} +lon_0={lon} +x_0=0 +y_0=0'
+                                            project = partial(
+                                                pyproj.transform,
+                                                pyproj.Proj(aeqd_proj.format(lat=lat, lon=lon)),
+                                                proj_wgs84)
+                                            buf = Point(0, 0).buffer(km * 1000)  # distance in metres
+                                            return transform(project, buf).exterior.coords[:]
+                                        radius_km = float(shape['radius']) *  1.852
+                                        b = geodesic_point_buffer(shape['lat'], shape['lon'], radius_km)
+                                        points = []
+                                        for coordinate in b:
+                                            points.append([coordinate[1], coordinate[0]])
+                                    elif shape['type'] in ["polyarc", "polyexclude"]:
+                                        points = shape['all_points']
+                                    aircraft_location = Point(self.latitude, self.longitude)
+                                    if polygon is None:
+                                        polygon = Polygon(points)
+                                    if polygon.contains(aircraft_location):
+                                        in_tfr = {'info': tfr, 'closest_shape_name' : shape['txtName']}
                                         break
-                                if not (self.alt_ft >= valDistVerLower and self.alt_ft <= valDistVerUpper):
-                                    if self.alt_ft > valDistVerUpper:
-                                        in_tfr['context'] = "above"
-                                    elif self.alt_ft < valDistVerLower:
-                                        in_tfr['context'] = "below"
-                                    print("But not in alt of TFR", in_tfr['context'])
+                                    else:
+                                        point_dists = []
+                                        for point in points:
+                                            from geopy.distance import geodesic
+                                            point = tuple(point)
+                                            point_dists.append(float((geodesic((self.latitude, self.longitude), point).mi)))
+                                        distance = min(point_dists)
+                                        if closest_tfr is None:
+                                            closest_tfr = {'info': tfr, 'closest_shape_name' : shape['txtName'], 'distance' : round(distance)}
+                                        elif distance < closest_tfr['distance']:
+                                            closest_tfr = {'info': tfr, 'closest_shape_name' : shape['txtName'], 'distance' : round(distance)}
+                        if in_tfr is not None:
+                            for shape in in_tfr['info']['details']['shapes']:
+                                if shape['txtName'] == in_tfr['closest_shape_name']:
+                                    valDistVerUpper, valDistVerLower = int(shape['valDistVerUpper']), int(shape['valDistVerLower'])
+                                    print("In TFR based off location checking alt next", in_tfr)
+                                    break
+                            if not (self.alt_ft >= valDistVerLower and self.alt_ft <= valDistVerUpper):
+                                if self.alt_ft > valDistVerUpper:
+                                    in_tfr['context'] = "above"
+                                elif self.alt_ft < valDistVerLower:
+                                    in_tfr['context'] = "below"
+                                print("But not in alt of TFR", in_tfr['context'])
 
-                            if in_tfr is None:
-                                print("Closest TFR", closest_tfr)
-                            #Generate Map
-                            import staticmaps
-                            context = staticmaps.Context()
-                            context.set_tile_provider(staticmaps.tile_provider_OSM)
-                            if in_tfr is not None:
-                                shapes = in_tfr['info']['details']['shapes']
-                            else:
-                                shapes = closest_tfr['info']['details']['shapes']
-                            def draw_poly(context, pairs):
-                                pairs.append(pairs[0])
-                                context.add_object(
-                                    staticmaps.Area(
-                                        [staticmaps.create_latlng(lat, lng) for lat, lng in pairs],
-                                        fill_color=staticmaps.parse_color("#FF000033"),
-                                        width=2,
-                                        color=staticmaps.parse_color("#8B0000"),
-                                    )
+                        if in_tfr is None:
+                            print("Closest TFR", closest_tfr)
+                        #Generate Map
+                        import staticmaps
+                        context = staticmaps.Context()
+                        context.set_tile_provider(staticmaps.tile_provider_OSM)
+                        if in_tfr is not None:
+                            shapes = in_tfr['info']['details']['shapes']
+                        else:
+                            shapes = closest_tfr['info']['details']['shapes']
+                        def draw_poly(context, pairs):
+                            pairs.append(pairs[0])
+                            context.add_object(
+                                staticmaps.Area(
+                                    [staticmaps.create_latlng(lat, lng) for lat, lng in pairs],
+                                    fill_color=staticmaps.parse_color("#FF000033"),
+                                    width=2,
+                                    color=staticmaps.parse_color("#8B0000"),
                                 )
-                                return context
-                            for shape in shapes:
-                                if shape['type'] == "poly":
-                                    pairs = shape['points']
-                                    context = draw_poly(context, pairs)
-                                elif shape['type'] == "polyarc" or shape['type'] == "polyexclude":
-                                    pairs = shape['all_points']
-                                    context = draw_poly(context, pairs)
-                                elif shape['type'] =="circle":
-                                    center = [shape['lat'], shape['lon']]
-                                    center1 = staticmaps.create_latlng(center[0], center[1])
-                                    context.add_object(staticmaps.Circle(center1, (float(shape['radius']) * 1.852), fill_color=staticmaps.parse_color("#FF000033"), color=staticmaps.parse_color("#8B0000"), width=2))
-                                    context.add_object(staticmaps.Marker(center1, color=staticmaps.RED))
-                            def tfr_image(context, aircraft_coords):
-                                from PIL import Image
-                                heading = self.track
-                                heading *= -1
-                                im = Image.open('./dependencies/ac.png')
-                                im_rotate = im.rotate(heading, resample=Image.BICUBIC)
-                                import tempfile
-                                rotated_file = f"{tempfile.gettempdir()}/rotated_ac.png"
-                                im_rotate.save(rotated_file)
-                                pos = staticmaps.create_latlng(aircraft_coords[0], aircraft_coords[1])
-                                marker = staticmaps.ImageMarker(pos, rotated_file, origin_x=35, origin_y=35)
-                                context.add_object(marker)
-                                image = context.render_cairo(1000, 1000)
-                                os.remove(rotated_file)
-                                tfr_map_filename = f"{tempfile.gettempdir()}/{self.icao}_TFR_.png"
-                                image.write_to_png(tfr_map_filename)
-                                return tfr_map_filename
+                            )
+                            return context
+                        for shape in shapes:
+                            if shape['type'] == "poly":
+                                pairs = shape['points']
+                                context = draw_poly(context, pairs)
+                            elif shape['type'] == "polyarc" or shape['type'] == "polyexclude":
+                                pairs = shape['all_points']
+                                context = draw_poly(context, pairs)
+                            elif shape['type'] =="circle":
+                                center = [shape['lat'], shape['lon']]
+                                center1 = staticmaps.create_latlng(center[0], center[1])
+                                context.add_object(staticmaps.Circle(center1, (float(shape['radius']) * 1.852), fill_color=staticmaps.parse_color("#FF000033"), color=staticmaps.parse_color("#8B0000"), width=2))
+                                context.add_object(staticmaps.Marker(center1, color=staticmaps.RED))
+                        def tfr_image(context, aircraft_coords):
+                            from PIL import Image
+                            heading = self.track
+                            heading *= -1
+                            im = Image.open('./dependencies/ac.png')
+                            im_rotate = im.rotate(heading, resample=Image.BICUBIC)
+                            import tempfile
+                            rotated_file = f"{tempfile.gettempdir()}/rotated_ac.png"
+                            im_rotate.save(rotated_file)
+                            pos = staticmaps.create_latlng(aircraft_coords[0], aircraft_coords[1])
+                            marker = staticmaps.ImageMarker(pos, rotated_file, origin_x=35, origin_y=35)
+                            context.add_object(marker)
+                            image = context.render_cairo(1000, 1000)
+                            os.remove(rotated_file)
+                            tfr_map_filename = f"{tempfile.gettempdir()}/{self.icao}_TFR_.png"
+                            image.write_to_png(tfr_map_filename)
+                            return tfr_map_filename
 
-                        try:
-                            from defSS import get_adsbx_screenshot
-                            url_params = f"largeMode=2&hideButtons&hideSidebar&mapDim=0&zoom=13&icao={self.icao}&overlays={self.get_adsbx_map_overlays()}&limitupdates=0"
-                            get_adsbx_screenshot(self.map_file_name, url_params, overrides=self.overrides, conceal_ac_id=self.conceal_ac_id, conceal_pia=self.conceal_pia)
-                            if neighborhood is not None:
-                                message = f"Circling over {neighborhood} at {self.alt_ft}ft."
-                            elif nearest_airport_dict['distance_mi'] < 3:
-                                if "touchngo" in self.circle_history.keys():
-                                    message = f"Doing touch and goes at {nearest_airport_dict['icao']}"
-                                else:
-                                    message =  f"Circling over {nearest_airport_dict['icao']} at {self.alt_ft}ft."
+                    try:
+                        from defSS import get_adsbx_screenshot
+                        url_params = f"largeMode=2&hideButtons&hideSidebar&mapDim=0&zoom=13&icao={self.icao}&overlays={self.get_adsbx_map_overlays()}&limitupdates=0"
+                        get_adsbx_screenshot(self.map_file_name, url_params, overrides=self.overrides, conceal_ac_id=self.conceal_ac_id, conceal_pia=self.conceal_pia)
+                        if neighborhood is not None:
+                            message = f"Circling over {neighborhood} at {self.alt_ft}ft."
+                        elif nearest_airport_dict['distance_mi'] < 3:
+                            if "touchngo" in self.circle_history.keys():
+                                message = f"Doing touch and goes at {nearest_airport_dict['icao']}"
                             else:
-                                message =  f"Circling {round(nearest_airport_dict['distance_mi'], 2)}mi {cardinal} of {nearest_airport_dict['icao']}, {nearest_airport_dict['name']} at {self.alt_ft}ft. "
-                            tfr_map_filename = None
-                            if in_tfr is not None:
-                                wording_context = "Inside" if 'context' not in in_tfr.keys() else "Above" if in_tfr['context'] == 'above' else "Below"
-                                message += f" {wording_context} TFR {in_tfr['info']['NOTAM']}, a TFR for {in_tfr['info']['Type'].title()}"
-                                tfr_map_filename = tfr_image(context, (self.latitude, self.longitude))
-                            elif in_tfr is None and closest_tfr is not None and "distance" in closest_tfr.keys() and closest_tfr["distance"] <= 20:
-                                message += f" {closest_tfr['distance']} miles from TFR {closest_tfr['info']['NOTAM']}, a TFR for {closest_tfr['info']['Type']}"
-                                tfr_map_filename = tfr_image(context, (self.latitude, self.longitude))
-                            elif in_tfr is None and closest_tfr is not None and "distance" not in closest_tfr.keys():
-                                message += f" near TFR {closest_tfr['info']['NOTAM']}, a TFR for {closest_tfr['info']['Type']}"
-                                raise Exception(message)
+                                message =  f"Circling over {nearest_airport_dict['icao']} at {self.alt_ft}ft."
+                        else:
+                            message =  f"Circling {round(nearest_airport_dict['distance_mi'], 2)}mi {cardinal} of {nearest_airport_dict['icao']}, {nearest_airport_dict['name']} at {self.alt_ft}ft. "
+                        tfr_map_filename = None
+                        if in_tfr is not None:
+                            wording_context = "Inside" if 'context' not in in_tfr.keys() else "Above" if in_tfr['context'] == 'above' else "Below"
+                            message += f" {wording_context} TFR {in_tfr['info']['NOTAM']}, a TFR for {in_tfr['info']['Type'].title()}"
+                            tfr_map_filename = tfr_image(context, (self.latitude, self.longitude))
+                        elif in_tfr is None and closest_tfr is not None and "distance" in closest_tfr.keys() and closest_tfr["distance"] <= 20:
+                            message += f" {closest_tfr['distance']} miles from TFR {closest_tfr['info']['NOTAM']}, a TFR for {closest_tfr['info']['Type']}"
+                            tfr_map_filename = tfr_image(context, (self.latitude, self.longitude))
+                        elif in_tfr is None and closest_tfr is not None and "distance" not in closest_tfr.keys():
+                            message += f" near TFR {closest_tfr['info']['NOTAM']}, a TFR for {closest_tfr['info']['Type']}"
+                            raise Exception(message)
 
-                            print(message)
-                            #Telegram
-                            if self._channel_enabled('TELEGRAM', circling=True):
-                                photo = open(self.map_file_name, "rb")
-                                from defTelegram import sendTeleg
-                                sendTeleg(photo, message, self.config)
-                            if self._channel_enabled('DISCORD', circling=True):
-                                role_id = self.config.get('DISCORD', 'ROLE_ID') if self.config.has_option('DISCORD', 'ROLE_ID') and self.config.get('DISCORD', 'ROLE_ID').strip() != "" else None
-                                if tfr_map_filename is not None:
-                                    sendDis(message, self.config, role_id, self.map_file_name, tfr_map_filename)
-                                elif tfr_map_filename is None:
-                                    sendDis(message, self.config, role_id, self.map_file_name)
-                            if self._channel_enabled('TWITTER', circling=True) and Plane.main_config.getboolean('TWITTER', 'ENABLE'):
-                                twitter_media_map_obj = self.tweet_api.media_upload(self.map_file_name)
-                                media_ids = [twitter_media_map_obj.media_id]
-                                if tfr_map_filename is not None:
-                                    twitter_media_tfr_map_obj = self.tweet_api.media_upload(tfr_map_filename)
-                                    media_ids.append(twitter_media_tfr_map_obj.media_id)
-                                elif tfr_map_filename is None:
-                                    print("No TFR Map")
-                                tweet = f"{self.twitter_title} {message}".strip()
-                                self.tweet_api.update_status(status = tweet, media_ids=media_ids)
-                            #Meta
-                            if self._channel_enabled('META', circling=True):
-                                from meta_toolkit import post_to_meta_both
-                                post_to_meta_both(self.config.get("META", "FB_PAGE_ID"), self.config.get("META", "IG_USER_ID"), self.map_file_name, message, self.config.get("META", "ACCESS_TOKEN"))
-                            #Mastodon
-                            if self._channel_enabled('MASTODON', circling=True):
-                                from defMastodon import sendMastodon
-                                sendMastodon(self.map_file_name, message, self.config)
-                            #Bluesky
-                            if self._channel_enabled('BLUESKY', circling=True):
-                                self.queue_bluesky_post(message, self.map_file_name, db_event_id=self.circle_history.get('db_event_id'))
-                        except Exception as e:
-                            print(f"Error generating screenshot or dispatching circling notification, skipping: {e}")
-                        if os.path.isfile(self.map_file_name):
-                            os.remove(self.map_file_name)
-                        self.circle_history['triggered'] = True
-                elif total_abs_change <= 360 and self.circle_history["triggered"]:
+                        print(message)
+                        #Telegram
+                        if self._channel_enabled('TELEGRAM', circling=True):
+                            photo = open(self.map_file_name, "rb")
+                            from defTelegram import sendTeleg
+                            sendTeleg(photo, message, self.config)
+                        if self._channel_enabled('DISCORD', circling=True):
+                            role_id = self.config.get('DISCORD', 'ROLE_ID') if self.config.has_option('DISCORD', 'ROLE_ID') and self.config.get('DISCORD', 'ROLE_ID').strip() != "" else None
+                            if tfr_map_filename is not None:
+                                sendDis(message, self.config, role_id, self.map_file_name, tfr_map_filename)
+                            elif tfr_map_filename is None:
+                                sendDis(message, self.config, role_id, self.map_file_name)
+                        if self._channel_enabled('TWITTER', circling=True) and Plane.main_config.getboolean('TWITTER', 'ENABLE'):
+                            twitter_media_map_obj = self.tweet_api.media_upload(self.map_file_name)
+                            media_ids = [twitter_media_map_obj.media_id]
+                            if tfr_map_filename is not None:
+                                twitter_media_tfr_map_obj = self.tweet_api.media_upload(tfr_map_filename)
+                                media_ids.append(twitter_media_tfr_map_obj.media_id)
+                            elif tfr_map_filename is None:
+                                print("No TFR Map")
+                            tweet = f"{self.twitter_title} {message}".strip()
+                            self.tweet_api.update_status(status = tweet, media_ids=media_ids)
+                        #Meta
+                        if self._channel_enabled('META', circling=True):
+                            from meta_toolkit import post_to_meta_both
+                            post_to_meta_both(self.config.get("META", "FB_PAGE_ID"), self.config.get("META", "IG_USER_ID"), self.map_file_name, message, self.config.get("META", "ACCESS_TOKEN"))
+                        #Mastodon
+                        if self._channel_enabled('MASTODON', circling=True):
+                            from defMastodon import sendMastodon
+                            sendMastodon(self.map_file_name, message, self.config)
+                        #Bluesky
+                        if self._channel_enabled('BLUESKY', circling=True):
+                            self.queue_bluesky_post(message, self.map_file_name, db_event_id=self.circle_history.get('db_event_id'))
+                    except Exception as e:
+                        print(f"Error generating screenshot or dispatching circling notification, skipping: {e}")
+                    if os.path.isfile(self.map_file_name):
+                        os.remove(self.map_file_name)
+                    self.circle_history['triggered'] = True
+                #Ends the event once the aircraft has left the area it was circling (feed loss is handled in the trace expiry block)
+                elif self.circle_history['triggered'] and loiter is None and self.latitude is not None and \
+                        geodesic((self.latitude, self.longitude), self.circle_history['centroid']).mi > circling_radius_mi * 2:
                     print("No Longer Circling, trigger cleared")
                     try:
                         import dataLog
@@ -920,6 +917,7 @@ class Plane:
                         print(f"Error logging circling event end, continuing: {e}")
                     self.circle_history['triggered'] = False
                     self.circle_history['db_event_id'] = None
+                    self.circle_history.pop('centroid', None)
             # #Power Up
             # if self.last_feeding == False and self.speed == 0 and self.on_ground:
             #     if self.config.getboolean('DISCORD', 'ENABLE'):

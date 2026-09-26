@@ -40,14 +40,23 @@ evidence chain and current status.
   file, loops forever polling the data source, sleeping `[SLEEP] SLEEPSEC`
   seconds between cycles.
 - **Event detection:** `planeClass.py`'s `Plane` class, same per-aircraft
-  state machine as upstream. Circling detection (`circle_history`,
-  `total_change` >= 720 degrees within a configurable centroid radius) is
-  the part this fork actually relies on - see the inline comments there for
-  the helicopter-specific tuning (`CIRCLING_CENTROID_RADIUS_MI`, default
-  much tighter than the jet-tracking default since a helicopter circles one
-  neighborhood block, not a wide jet holding pattern).
-- **Data source:** `defAirplanesLive.py` (airplanes.live's free public API)
-  - same as the jet-tracking sibling, no API key/cost.
+  state machine as upstream. Circling detection is the part this fork
+  actually relies on, and it has **replaced** upstream's "720 degrees of
+  accumulated turning" rule with a loiter test in `loiter.py`: every
+  position over the last `CIRCLING_WINDOW_MIN` (5) minutes within
+  `CIRCLING_CENTROID_RADIUS_MI` (1.0) of their centroid, plus at least
+  `CIRCLING_MIN_TURN_DEG` (180) of turning. At our ~30s sampling a
+  helicopter can finish an orbit between samples, so accumulated turning is
+  mostly noise, and upstream's 20-minute window let transit legs drag the
+  centroid (and the posted neighborhood) across town. The centroid posted
+  and stored is from the loiter window only. An event ends when the
+  aircraft moves more than 2x the radius away or drops off the feed for 10
+  minutes.
+- **Data source:** `defAirplanesLive.py` - despite the name, now points at
+  adsb.fi's open data API (airplanes.live started returning 403 and requires
+  emailed approval). Free, no key, limited to 1 request/second, hence the 2s
+  sleep per request. adsb.fi's terms require crediting them with a link,
+  which is done via `[MAP] TEXT_CREDIT` and the Bluesky alt text.
 - **Notification channels:** same `defX.py` pattern as upstream
   (`sendX(photo, message, config)`), but with one addition specific to this
   fork: each channel's circling dispatch checks `ENABLE_CIRCLING` instead of

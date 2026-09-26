@@ -36,7 +36,7 @@ API_VERSION = 2
 
 #Define the delay interval in seconds between each data request. This is useful if you have limited requests in the API.
 [SLEEP]
-SLEEPSEC = 60
+SLEEPSEC = 20
 
 [GOOGLE]
 #API KEY for Google Static Maps only if you using this on any of the planes.
